@@ -1,34 +1,28 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import time
+import requests
 import cloudinary
 import cloudinary.uploader
-import requests
-import time
-import os
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# --- CẤU HÌNH (CONFIG) ---
+# --- CẤU HÌNH ---
 
-# 1. Chế độ Test: Bật lên (True) để không mất tiền/token khi đang code giao diện
-# Khi nào nộp bài thì sửa thành False
-TEST_MODE = True 
-
-# [cite_start]2. Cấu hình Cloudinary (Lấy tại cloudinary.com - BẮT BUỘC để có link ảnh public) [cite: 43, 44]
+# 1. Cloudinary (Vẫn bắt buộc để lưu ảnh trung gian) 
 cloudinary.config( 
   cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"), 
   api_key = os.getenv("CLOUDINARY_API_KEY"), 
   api_secret = os.getenv("CLOUDINARY_API_SECRET") 
 )
 
-# [cite_start]3. Cấu hình API AI (Synexa hoặc Meshy) [cite: 51, 52]
-# Ví dụ cấu hình cho Synexa (hoặc thay bằng Meshy nếu Synexa hết free)
-AI_API_KEY = "DIEN_KEY_CUA_BEN_AI_VAO_DAY"
-AI_ENDPOINT = "https://api.synexa.ai/v1/generate" # Kiểm tra lại doc của họ
+# 2. AI Key (Lấy từ Environment Render) 
+AI_API_KEY = os.getenv("AI_API_KEY") 
 
-# --- THIẾT LẬP SERVER ---
+# Endpoint Meshy v2 (Bản ổn định nhất hiện tại) 
+AI_API_URL = "https://api.meshy.ai/v2/image-to-3d"
 
-# [cite_start]Cho phép Frontend gọi vào từ mọi nơi (CORS) [cite: 66]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,66 +34,87 @@ app.add_middleware(
 @app.post("/generate")
 async def generate_3d_model(file: UploadFile = File(...)):
     
-    # [cite_start]BƯỚC 1: UPLOAD ẢNH LÊN CLOUD (Để lấy Public URL) [cite: 47, 48]
+    # --- BƯỚC 1: UPLOAD ẢNH LÊN CLOUD ---
     try:
-        print("--- Bắt đầu xử lý ---")
-        # Upload lên Cloudinary
+        print("1. [PRO] Đang upload ảnh HD lên Cloudinary...")
         upload_result = cloudinary.uploader.upload(file.file)
         image_public_url = upload_result.get("secure_url")
-        print(f"1. Ảnh đã lên mây: {image_public_url}")
-        
-        if not image_public_url:
-            return {"errorCode": "UPLOAD_ERR", "message": "Lỗi upload ảnh"}
-
+        print(f"   -> Link ảnh: {image_public_url}")
     except Exception as e:
-        return {"errorCode": "UPLOAD_EXCEPTION", "message": str(e)}
+        return {"errorCode": "UPLOAD_FAIL", "message": str(e)}
 
-    # [cite_start]BƯỚC 2: GỌI AI TẠO 3D [cite: 50]
-    
-    # --- A. NẾU ĐANG TEST (Tiết kiệm tiền/thời gian) ---
-    if TEST_MODE:
-        print("2. Chế độ TEST: Trả về file mẫu sau 3s...")
-        time.sleep(3) # Giả vờ đợi
-        # Link file .glb mẫu (Con vịt) để Frontend test hiển thị
-        dummy_glb = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb"
-        
-        # [cite_start]Trả về đúng định dạng JSON mà PDF yêu cầu [cite: 60, 80]
-        return {"glbUrl": dummy_glb}
-
-    # --- B. NẾU CHẠY THẬT (Gọi API) ---
-    print("2. Chế độ REAL: Đang gọi AI API...")
+    # --- BƯỚC 2: GỬI YÊU CẦU MAX SETTING ---
+    print("2. [PRO] Đang gọi AI tạo model chất lượng cao...")
     
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    # Cấu hình tham số "Xịn" nhất 
     payload = {
         "image_url": image_public_url,
-        # [cite_start]Các tham số khác tùy vào document của bên AI [cite: 52]
-        "format": "glb" 
+        "enable_pbr": True,      # QUAN TRỌNG: Tạo chất liệu PBR (kim loại, gỗ, da...)
+        # "surface_mode": "hard", # Bật cái này nếu vật thể là đồ cứng (xe, bàn ghế). Nếu là nhân vật thì bỏ qua.
     }
 
     try:
-        response = requests.post(AI_ENDPOINT, json=payload, headers=headers)
+        # Gửi request tạo
+        response = requests.post(AI_API_URL, json=payload, headers=headers)
         
-        # [cite_start]Xử lý lỗi từ AI [cite: 56, 69]
-        if response.status_code != 200:
-            print(f"Lỗi API: {response.text}")
-            return {"errorCode": "AI_FAIL", "message": "AI từ chối phục vụ"}
-
+        if response.status_code != 202 and response.status_code != 200:
+            print(f"❌ Lỗi AI: {response.text}")
+            return {"errorCode": "AI_REJECT", "message": response.text}
+        
         data = response.json()
+        task_id = data.get("result") # Lấy mã vé đợi
         
-        # [cite_start]Lấy link GLB từ kết quả trả về [cite: 53]
-        # Cần xem kỹ JSON của Synexa để sửa dòng dưới cho đúng key (ví dụ: data['model_url'] hay data['result']['url'])
-        final_glb_url = data.get("data", {}).get("model_url") 
+        if not task_id:
+             return {"errorCode": "NO_TASK_ID", "message": "AI không trả về ID"}
         
-        if not final_glb_url:
-             return {"errorCode": "NO_GLB", "message": "AI chạy xong nhưng không thấy link file"}
-
-        return {"glbUrl": final_glb_url}
+        print(f"   -> Task ID: {task_id}. Đang chờ vẽ (sẽ mất khoảng 1-2 phút)...")
 
     except Exception as e:
-        return {"errorCode": "API_CRASH", "message": str(e)}
+        return {"errorCode": "AI_CONN_ERR", "message": str(e)}
 
+    # --- BƯỚC 3: VÒNG LẶP CHỜ (POLLING) ---
+    # Chế độ Pro vẽ lâu hơn, nên kiên nhẫn chờ 
+    
+    max_retries = 40     # Thử 40 lần
+    sleep_interval = 3   # Mỗi lần nghỉ 3 giây
+    # Tổng thời gian chờ tối đa = 120 giây (2 phút)
+    
+    for i in range(max_retries):
+        time.sleep(sleep_interval) 
+        
+        try:
+            # Hỏi trạng thái
+            check_url = f"{AI_API_URL}/{task_id}" 
+            check_response = requests.get(check_url, headers=headers)
+            check_data = check_response.json()
+            
+            status = check_data.get("status") # SUCCEEDED / IN_PROGRESS
+            
+            # In log ra màn hình Render để bạn theo dõi
+            progress = check_data.get("progress", 0)
+            print(f"   -> [Lần {i+1}/{max_retries}] Tiến độ: {progress}% - {status}")
 
-# Chạy server: uvicorn main:app --reload
+            if status == "SUCCEEDED":
+                model_urls = check_data.get("model_urls", {})
+                glb_url = model_urls.get("glb") 
+                
+                print(f"✅ DONE! Link hàng xịn: {glb_url}")
+                
+                # Trả về đúng format cho Frontend 
+                return {"glbUrl": glb_url}
+            
+            elif status == "FAILED":
+                 err_msg = check_data.get("task_error", {}).get("message", "Unknown Error")
+                 return {"errorCode": "AI_FAILED", "message": err_msg}
+
+        except Exception as e:
+            print(f"Lỗi check status: {e}")
+            continue
+
+    # Nếu chờ quá 2 phút
+    return {"errorCode": "TIMEOUT", "message": "AI vẽ quá kỹ nên lâu quá, thử lại sau!"}
