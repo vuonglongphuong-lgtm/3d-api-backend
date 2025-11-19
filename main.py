@@ -4,6 +4,7 @@ import cloudinary
 import cloudinary.uploader
 import requests
 import time
+import os
 
 app = FastAPI()
 
@@ -15,9 +16,9 @@ TEST_MODE = True
 
 # [cite_start]2. Cấu hình Cloudinary (Lấy tại cloudinary.com - BẮT BUỘC để có link ảnh public) [cite: 43, 44]
 cloudinary.config( 
-  cloud_name = "DIEN_TEN_CLOUD_CUA_BAN", 
-  api_key = "DIEN_API_KEY", 
-  api_secret = "DIEN_API_SECRET" 
+  cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"), 
+  api_key = os.getenv("CLOUDINARY_API_KEY"), 
+  api_secret = os.getenv("CLOUDINARY_API_SECRET") 
 )
 
 # [cite_start]3. Cấu hình API AI (Synexa hoặc Meshy) [cite: 51, 52]
@@ -99,5 +100,6 @@ async def generate_3d_model(file: UploadFile = File(...)):
 
     except Exception as e:
         return {"errorCode": "API_CRASH", "message": str(e)}
+
 
 # Chạy server: uvicorn main:app --reload
