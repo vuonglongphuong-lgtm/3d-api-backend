@@ -1,28 +1,22 @@
 import os
-import time
 import requests
 import cloudinary
 import cloudinary.uploader
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 app = FastAPI()
 
-# --- CẤU HÌNH (BẮT BUỘC) ---
-
-# 1. Cloudinary: Vẫn cần dùng để biến ảnh thành link URL
+# --- CẤU HÌNH ---
 cloudinary.config( 
   cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"), 
   api_key = os.getenv("CLOUDINARY_API_KEY"), 
   api_secret = os.getenv("CLOUDINARY_API_SECRET") 
 )
 
-# 2. Meshy API Key
 AI_API_KEY = os.getenv("AI_API_KEY")
-
-# 3. Endpoint CHUẨN (Theo code bạn gửi)
-# Lưu ý: Có chữ "openapi" ở giữa
-AI_API_URL = "https://api.meshy.ai/openapi/v1/image-to-3d"
+AI_API_URL = "https://api.meshy.ai/openapi/v1/image-to-3d" # CHUẨN V1
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,90 +26,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Định nghĩa body cho API check status
+class StatusRequest(BaseModel):
+    task_id: str
+
+# --- API 1: GỬI YÊU CẦU (Xong ngay lập tức) ---
 @app.post("/generate")
-async def generate_3d_model(file: UploadFile = File(...)):
-    
-    # --- BƯỚC 1: UPLOAD ẢNH LÊN CLOUD ---
+async def generate_task(file: UploadFile = File(...)):
     try:
-        print("1. Uploading image to Cloudinary...")
+        # 1. Upload Cloudinary
+        print("1. Uploading...")
         upload_result = cloudinary.uploader.upload(file.file)
-        image_public_url = upload_result.get("secure_url")
-        print(f"   -> Image URL: {image_public_url}")
-    except Exception as e:
-        return {"errorCode": "UPLOAD_FAIL", "message": str(e)}
-
-    # --- BƯỚC 2: GỬI YÊU CẦU TẠO (POST) ---
-    print("2. Calling Meshy API...")
-    
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    # Payload chuẩn theo code mẫu bạn gửi
-    payload = {
-        "image_url": image_public_url,
-        "enable_pbr": True,      # Bật vật liệu PBR
-        "should_remesh": True,   # Tối ưu lưới
-        "should_texture": True   # Tạo texture màu
-    }
-
-    try:
-        # Gửi yêu cầu POST
-        response = requests.post(AI_API_URL, json=payload, headers=headers)
+        image_url = upload_result.get("secure_url")
         
-        # Check lỗi ngay lập tức nếu API từ chối
-        if response.status_code != 202 and response.status_code != 200:
-            print(f"❌ API Error: {response.text}")
-            return {"errorCode": "AI_REJECT", "message": response.text}
+        # 2. Gọi Meshy tạo Task
+        print("2. Sending to Meshy...")
+        headers = {"Authorization": f"Bearer {AI_API_KEY}"}
+        payload = {
+            "image_url": image_url,
+            "enable_pbr": True,
+            "should_remesh": True,
+            "should_texture": True
+        }
         
-        data = response.json()
+        resp = requests.post(AI_API_URL, json=payload, headers=headers)
+        data = resp.json()
         
-        # Meshy trả về task ID trong field "result"
         task_id = data.get("result")
-        
         if not task_id:
-             return {"errorCode": "NO_TASK_ID", "message": "No Task ID returned"}
-        
-        print(f"   -> Task ID received: {task_id}. Waiting for result...")
+            return {"errorCode": "FAIL", "message": str(data)}
+            
+        # TRẢ VỀ TASK ID NGAY (Không chờ vẽ)
+        # Frontend sẽ dùng ID này để hỏi tiếp
+        return {
+            "status": "PENDING",
+            "task_id": task_id, 
+            "message": "Đã nhận đơn, vui lòng gọi API /check-status để xem tiến độ"
+        }
 
     except Exception as e:
-        return {"errorCode": "CONNECTION_ERROR", "message": str(e)}
+        return {"errorCode": "ERROR", "message": str(e)}
 
-    # --- BƯỚC 3: CHỜ KẾT QUẢ (POLLING) ---
-    # Code mẫu bạn gửi chỉ có phần gửi (POST), còn phần lấy (GET) thì phải tự code thêm vòng lặp này
-    
-    max_retries = 60   # Chờ tối đa 2 phút (60 lần x 2s)
-    
-    for i in range(max_retries):
-        time.sleep(2) # Nghỉ 2 giây
+# --- API 2: KIỂM TRA TRẠNG THÁI (Frontend gọi liên tục mỗi 5s) ---
+@app.post("/check-status")
+async def check_status(req: StatusRequest):
+    try:
+        headers = {"Authorization": f"Bearer {AI_API_KEY}"}
+        check_url = f"{AI_API_URL}/{req.task_id}"
         
-        try:
-            # Đường dẫn check status: thêm task_id vào sau URL gốc
-            check_url = f"{AI_API_URL}/{task_id}"
-            
-            check_response = requests.get(check_url, headers=headers)
-            check_data = check_response.json()
-            
-            status = check_data.get("status") # SUCCEEDED / IN_PROGRESS
-            progress = check_data.get("progress", 0)
-            
-            print(f"   -> Progress: {progress}% ({status})")
+        resp = requests.get(check_url, headers=headers)
+        data = resp.json()
+        
+        status = data.get("status")     # SUCCEEDED, IN_PROGRESS, FAILED
+        progress = data.get("progress") # 0 -> 100
+        
+        response_data = {
+            "status": status,
+            "progress": progress,
+            "task_id": req.task_id
+        }
 
-            if status == "SUCCEEDED":
-                # Lấy link GLB
-                model_urls = check_data.get("model_urls", {})
-                glb_url = model_urls.get("glb")
-                
-                print(f"✅ SUCCESS! GLB URL: {glb_url}")
-                return {"glbUrl": glb_url}
+        if status == "SUCCEEDED":
+            response_data["glbUrl"] = data.get("model_urls", {}).get("glb")
+        
+        elif status == "FAILED":
+            response_data["error"] = data.get("task_error", {}).get("message")
             
-            elif status == "FAILED":
-                err = check_data.get("task_error", {}).get("message")
-                return {"errorCode": "AI_FAILED", "message": err}
+        return response_data
 
-        except Exception as e:
-            print(f"Polling error: {e}")
-            continue
-
-    return {"errorCode": "TIMEOUT", "message": "Task took too long"}
+    except Exception as e:
+        return {"errorCode": "CHECK_FAIL", "message": str(e)}
