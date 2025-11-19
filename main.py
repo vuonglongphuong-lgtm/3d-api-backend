@@ -3,25 +3,26 @@ import time
 import requests
 import cloudinary
 import cloudinary.uploader
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# --- CẤU HÌNH ---
+# --- CẤU HÌNH (BẮT BUỘC) ---
 
-# 1. Cloudinary (Vẫn bắt buộc để lưu ảnh trung gian) 
+# 1. Cloudinary: Vẫn cần dùng để biến ảnh thành link URL
 cloudinary.config( 
   cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"), 
   api_key = os.getenv("CLOUDINARY_API_KEY"), 
   api_secret = os.getenv("CLOUDINARY_API_SECRET") 
 )
 
-# 2. AI Key (Lấy từ Environment Render) 
-AI_API_KEY = os.getenv("AI_API_KEY") 
+# 2. Meshy API Key
+AI_API_KEY = os.getenv("AI_API_KEY")
 
-# Endpoint Meshy v2 (Bản ổn định nhất hiện tại) 
-AI_API_URL = "https://api.meshy.ai/v2/image-to-3d"
+# 3. Endpoint CHUẨN (Theo code bạn gửi)
+# Lưu ý: Có chữ "openapi" ở giữa
+AI_API_URL = "https://api.meshy.ai/openapi/v1/image-to-3d"
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,85 +37,85 @@ async def generate_3d_model(file: UploadFile = File(...)):
     
     # --- BƯỚC 1: UPLOAD ẢNH LÊN CLOUD ---
     try:
-        print("1. [PRO] Đang upload ảnh HD lên Cloudinary...")
+        print("1. Uploading image to Cloudinary...")
         upload_result = cloudinary.uploader.upload(file.file)
         image_public_url = upload_result.get("secure_url")
-        print(f"   -> Link ảnh: {image_public_url}")
+        print(f"   -> Image URL: {image_public_url}")
     except Exception as e:
         return {"errorCode": "UPLOAD_FAIL", "message": str(e)}
 
-    # --- BƯỚC 2: GỬI YÊU CẦU MAX SETTING ---
-    print("2. [PRO] Đang gọi AI tạo model chất lượng cao...")
+    # --- BƯỚC 2: GỬI YÊU CẦU TẠO (POST) ---
+    print("2. Calling Meshy API...")
     
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # Cấu hình tham số "Xịn" nhất 
+    # Payload chuẩn theo code mẫu bạn gửi
     payload = {
         "image_url": image_public_url,
-        "enable_pbr": True,      # QUAN TRỌNG: Tạo chất liệu PBR (kim loại, gỗ, da...)
-        # "surface_mode": "hard", # Bật cái này nếu vật thể là đồ cứng (xe, bàn ghế). Nếu là nhân vật thì bỏ qua.
+        "enable_pbr": True,      # Bật vật liệu PBR
+        "should_remesh": True,   # Tối ưu lưới
+        "should_texture": True   # Tạo texture màu
     }
 
     try:
-        # Gửi request tạo
+        # Gửi yêu cầu POST
         response = requests.post(AI_API_URL, json=payload, headers=headers)
         
+        # Check lỗi ngay lập tức nếu API từ chối
         if response.status_code != 202 and response.status_code != 200:
-            print(f"❌ Lỗi AI: {response.text}")
+            print(f"❌ API Error: {response.text}")
             return {"errorCode": "AI_REJECT", "message": response.text}
         
         data = response.json()
-        task_id = data.get("result") # Lấy mã vé đợi
+        
+        # Meshy trả về task ID trong field "result"
+        task_id = data.get("result")
         
         if not task_id:
-             return {"errorCode": "NO_TASK_ID", "message": "AI không trả về ID"}
+             return {"errorCode": "NO_TASK_ID", "message": "No Task ID returned"}
         
-        print(f"   -> Task ID: {task_id}. Đang chờ vẽ (sẽ mất khoảng 1-2 phút)...")
+        print(f"   -> Task ID received: {task_id}. Waiting for result...")
 
     except Exception as e:
-        return {"errorCode": "AI_CONN_ERR", "message": str(e)}
+        return {"errorCode": "CONNECTION_ERROR", "message": str(e)}
 
-    # --- BƯỚC 3: VÒNG LẶP CHỜ (POLLING) ---
-    # Chế độ Pro vẽ lâu hơn, nên kiên nhẫn chờ 
+    # --- BƯỚC 3: CHỜ KẾT QUẢ (POLLING) ---
+    # Code mẫu bạn gửi chỉ có phần gửi (POST), còn phần lấy (GET) thì phải tự code thêm vòng lặp này
     
-    max_retries = 40     # Thử 40 lần
-    sleep_interval = 3   # Mỗi lần nghỉ 3 giây
-    # Tổng thời gian chờ tối đa = 120 giây (2 phút)
+    max_retries = 60   # Chờ tối đa 2 phút (60 lần x 2s)
     
     for i in range(max_retries):
-        time.sleep(sleep_interval) 
+        time.sleep(2) # Nghỉ 2 giây
         
         try:
-            # Hỏi trạng thái
-            check_url = f"{AI_API_URL}/{task_id}" 
+            # Đường dẫn check status: thêm task_id vào sau URL gốc
+            check_url = f"{AI_API_URL}/{task_id}"
+            
             check_response = requests.get(check_url, headers=headers)
             check_data = check_response.json()
             
             status = check_data.get("status") # SUCCEEDED / IN_PROGRESS
-            
-            # In log ra màn hình Render để bạn theo dõi
             progress = check_data.get("progress", 0)
-            print(f"   -> [Lần {i+1}/{max_retries}] Tiến độ: {progress}% - {status}")
+            
+            print(f"   -> Progress: {progress}% ({status})")
 
             if status == "SUCCEEDED":
+                # Lấy link GLB
                 model_urls = check_data.get("model_urls", {})
-                glb_url = model_urls.get("glb") 
+                glb_url = model_urls.get("glb")
                 
-                print(f"✅ DONE! Link hàng xịn: {glb_url}")
-                
-                # Trả về đúng format cho Frontend 
+                print(f"✅ SUCCESS! GLB URL: {glb_url}")
                 return {"glbUrl": glb_url}
             
             elif status == "FAILED":
-                 err_msg = check_data.get("task_error", {}).get("message", "Unknown Error")
-                 return {"errorCode": "AI_FAILED", "message": err_msg}
+                err = check_data.get("task_error", {}).get("message")
+                return {"errorCode": "AI_FAILED", "message": err}
 
         except Exception as e:
-            print(f"Lỗi check status: {e}")
+            print(f"Polling error: {e}")
             continue
 
-    # Nếu chờ quá 2 phút
-    return {"errorCode": "TIMEOUT", "message": "AI vẽ quá kỹ nên lâu quá, thử lại sau!"}
+    return {"errorCode": "TIMEOUT", "message": "Task took too long"}
