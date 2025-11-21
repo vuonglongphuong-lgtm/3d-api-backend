@@ -15,10 +15,10 @@ cloudinary.config(
   api_secret = os.getenv("CLOUDINARY_API_SECRET") 
 )
 
-# Đổi sang Key của Synexa
+# Key của Synexa
 SYNEXA_API_KEY = os.getenv("SYNEXA_API_KEY")
 
-# Endpoint của Synexa
+# Endpoint API (Dùng requests gọi API an toàn hơn dùng thư viện synexa.run)
 SYNEXA_URL = "https://api.synexa.ai/v1/predictions"
 
 app.add_middleware(
@@ -32,69 +32,64 @@ app.add_middleware(
 class StatusRequest(BaseModel):
     task_id: str
 
-# --- API 1: GỬI YÊU CẦU (CREATE PREDICTION) ---
+# --- API 1: GỬI YÊU CẦU (Cập nhật tham số chuẩn) ---
 @app.post("/generate")
 async def generate_task(file: UploadFile = File(...)):
     try:
-        # 1. Upload Cloudinary (Giữ nguyên)
+        # 1. Upload Cloudinary
         print("1. Uploading to Cloudinary...")
         upload_result = cloudinary.uploader.upload(file.file)
         image_url = upload_result.get("secure_url")
         
-        # 2. Gọi Synexa (Hunyuan3D)
-        print("2. Sending to Synexa (Hunyuan)...")
+        # 2. Gọi Synexa (Hunyuan3D-2)
+        print("2. Sending to Synexa...")
         
-        # Header của Synexa dùng 'x-api-key' thay vì 'Authorization'
         headers = {
             "x-api-key": SYNEXA_API_KEY,
             "Content-Type": "application/json"
         }
         
-        # Payload theo đúng mẫu curl bạn gửi
-        # Tôi đã chỉnh 'shape_only': False để nó có màu (Texture)
-        # Và tăng 'steps' lên 30 để đẹp hơn (5 bước thì nhanh nhưng xấu)
+        # --- CẬP NHẬT QUAN TRỌNG Ở ĐÂY ---
+        # Tôi đã map các tham số từ code python bạn gửi vào đây
         payload = {
             "model": "tencent/hunyuan3d-2",
             "input": {
                 "image": image_url,
-                "seed": 1234,      # Có thể random nếu muốn
-                "steps": 30,       # Tăng lên 30-50 cho đẹp
+                "seed": 1234,         # Giữ nguyên seed
+                "steps": 30,          # LƯU Ý: Code bạn là 5, tôi tăng lên 30 cho đẹp (giá ko đổi)
                 "caption": "",
-                "shape_only": False, # False = Có màu, True = Trắng đen
+                "shape_only": False,  # LƯU Ý: Tôi để False để có MÀU SẮC (AR cần màu). True là trắng đen.
                 "guidance_scale": 5.5,
+                "multiple_views": [], # Đã thêm dòng này theo code bạn gửi
                 "check_box_rembg": True,
                 "octree_resolution": "256"
             }
         }
         
+        # Gửi đi (Mất 1 giây)
         resp = requests.post(SYNEXA_URL, json=payload, headers=headers)
         
-        # Check lỗi
         if resp.status_code != 201 and resp.status_code != 200:
             print(f"❌ Synexa Error: {resp.text}")
             return {"errorCode": "AI_REJECT", "message": resp.text}
 
         data = resp.json()
-        
-        # Synexa trả về ID ở field "id"
         task_id = data.get("id")
         
         if not task_id:
-            return {"errorCode": "FAIL", "message": "No ID returned from Synexa"}
+            return {"errorCode": "FAIL", "message": "No ID returned"}
             
-        print(f"   -> Task ID: {task_id}")
-
-        # Trả về format cũ để Frontend không phải sửa code
+        # Trả ID về ngay để né Timeout
         return {
             "status": "PENDING",
             "task_id": task_id, 
-            "message": "Synexa đã nhận việc."
+            "message": "Synexa đang xử lý, vui lòng gọi /check-status"
         }
 
     except Exception as e:
         return {"errorCode": "ERROR", "message": str(e)}
 
-# --- API 2: KIỂM TRA TRẠNG THÁI (GET PREDICTION) ---
+# --- API 2: KIỂM TRA TRẠNG THÁI (Giữ nguyên logic Async) ---
 @app.post("/check-status")
 async def check_status(req: StatusRequest):
     try:
@@ -103,17 +98,13 @@ async def check_status(req: StatusRequest):
             "Content-Type": "application/json"
         }
         
-        # URL check status: .../predictions/{id}
         check_url = f"{SYNEXA_URL}/{req.task_id}"
         
         resp = requests.get(check_url, headers=headers)
         data = resp.json()
         
-        # Synexa trả về status dạng chữ thường: "starting", "processing", "succeeded", "failed"
-        raw_status = data.get("status")
+        raw_status = data.get("status") # succeeded, processing, failed
         
-        # MAP STATUS: Chuyển đổi trạng thái của Synexa sang chuẩn chung của App mình
-        # Để Unity không bị ngáo
         final_status = "IN_PROGRESS"
         progress = 0
         
@@ -123,7 +114,7 @@ async def check_status(req: StatusRequest):
         elif raw_status == "failed":
             final_status = "FAILED"
         elif raw_status == "processing":
-            progress = 50 # Fake progress vì Synexa ko trả về % cụ thể
+            progress = 50
         
         response_data = {
             "status": final_status,
@@ -132,18 +123,17 @@ async def check_status(req: StatusRequest):
         }
 
         if final_status == "SUCCEEDED":
-            # Synexa trả về link GLB trong field "output"
-            # Lưu ý: output có thể là string url hoặc list, ta lấy an toàn
+            # Lấy link GLB từ output
             output = data.get("output")
             if isinstance(output, list):
-                glb_url = output[0] # Nếu là list lấy phần tử đầu
+                glb_url = output[0]
             else:
-                glb_url = output    # Nếu là string lấy luôn
+                glb_url = output
             
             response_data["glbUrl"] = glb_url
         
         elif final_status == "FAILED":
-            response_data["error"] = data.get("error", "Unknown Synexa Error")
+            response_data["error"] = data.get("error", "Unknown Error")
             
         return response_data
 
