@@ -56,7 +56,7 @@ async def generate_task(file: UploadFile = File(...)):
             "input": {
                 "image": image_url,
                 "seed": 1234,         # Giữ nguyên seed
-                "steps": 30,          # LƯU Ý: Code bạn là 5, tôi tăng lên 30 cho đẹp (giá ko đổi)
+                "steps": 20,          # LƯU Ý: Code bạn là 5, tôi tăng lên 30 cho đẹp (giá ko đổi)
                 "caption": "",
                 "shape_only": False,  # LƯU Ý: Tôi để False để có MÀU SẮC (AR cần màu). True là trắng đen.
                 "guidance_scale": 5.5,
@@ -139,3 +139,4 @@ async def check_status(req: StatusRequest):
 
     except Exception as e:
         return {"errorCode": "CHECK_FAIL", "message": str(e)}
+
